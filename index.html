@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Bankroll</title>
+<style>
+:root{--bg:#f6f7f4;--card:#fff;--tx:#1b1f1c;--mu:#6b736d;--ln:#e2e5df;--ac:#1f7a4d;--win:#1f7a4d;--loss:#c0392b;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121513;--card:#1c211e;--tx:#eef1ee;--mu:#98a19a;--ln:#2c332e;--ac:#3ecf8e;--win:#3ecf8e;--loss:#ff6b5e;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#121513;--card:#1c211e;--tx:#eef1ee;--mu:#98a19a;--ln:#2c332e;--ac:#3ecf8e;--win:#3ecf8e;--loss:#ff6b5e;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.4 -apple-system,system-ui,"Segoe UI",sans-serif;max-width:640px;margin-inline:auto;padding:12px 14px 90px}
+h1{font-size:22px;margin:6px 0 12px}
+nav{display:flex;gap:6px;margin-bottom:14px}
+nav button{flex:1;padding:9px;border:1px solid var(--ln);background:var(--card);color:var(--mu);border-radius:10px;font:inherit;font-weight:600}
+nav button.on{background:var(--ac);color:#fff;border-color:var(--ac)}
+.card{background:var(--card);border:1px solid var(--ln);border-radius:14px;padding:14px;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.stat small{display:block;color:var(--mu);font-size:12px}
+.stat b{font-size:20px}
+.win{color:var(--win)}.loss{color:var(--loss)}
+.row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--ln)}
+.row:last-child{border:0}
+.row small{color:var(--mu)}
+label{display:block;font-size:13px;color:var(--mu);margin:10px 0 4px}
+input,select,textarea{width:100%;padding:10px;border:1px solid var(--ln);border-radius:10px;background:var(--bg);color:var(--tx);font:inherit}
+.btn{padding:11px 16px;border:0;border-radius:10px;background:var(--ac);color:#fff;font:inherit;font-weight:600}
+.btn.sec{background:transparent;color:var(--mu);border:1px solid var(--ln)}
+.btn.del{background:transparent;color:var(--loss);border:1px solid var(--ln)}
+.fab{position:fixed;right:18px;bottom:calc(18px + env(safe-area-inset-bottom,0px));width:58px;height:58px;border-radius:29px;font-size:30px;box-shadow:0 4px 14px #0004}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.sheet{position:fixed;inset:0;background:#0007;display:none;align-items:flex-end;z-index:20}
+.sheet.open{display:flex}
+.sheet>div{background:var(--card);width:100%;max-width:640px;margin:auto;max-height:92%;overflow:auto;border-radius:18px 18px 0 0;padding:16px 16px calc(24px + env(safe-area-inset-bottom,0px))}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td,th{padding:7px 4px;text-align:right;border-bottom:1px solid var(--ln)}
+td:first-child,th:first-child{text-align:left}
+th{color:var(--mu);font-weight:500;font-size:12px}
+.mu{color:var(--mu);font-size:13px}
+svg{width:100%;height:auto;display:block}
+</style>
+</head>
+<body>
+<h1>♠ Bankroll</h1>
+<nav><button data-t="sessions" class="on">Sessions</button><button data-t="stats">Stats</button><button data-t="locs">Locations</button></nav>
+<div id="view"></div>
+<button class="btn fab" id="fab" aria-label="Add session">+</button>
+
+<div class="sheet" id="sheet"><div id="sheetBody"></div></div>
+
+<script>
+const $=s=>document.querySelector(s);
+let S={sessions:[],locs:[]},tab="sessions",store=null,uid=null,mode="local";
+const money=n=>(n<0?"−":"")+"$"+Math.abs(Math.round(n)).toLocaleString();
+const cls=n=>n>=0?"win":"loss";
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const today=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")};
+const profit=s=>s.cashout-s.buyin-(s.reloads||0);
+const fmtDate=d=>new Date(d+"T12:00:00").toLocaleDateString(undefined,{month:"short",day:"numeric",year:"numeric"});
+
+/* ---------- storage: Cloudflare Worker + D1 ---------- */
+async function api(method,path,body){
+  const r=await fetch("/api/"+path,{method,headers:{"Content-Type":"application/json"},body:body?JSON.stringify(body):undefined});
+  if(!r.ok)throw new Error(r.status);return r.json();
+}
+async function save(type,item){try{await api("PUT",type==="s"?"sessions":"locations",item)}catch(e){alert("Save failed ("+e.message+")")}}
+async function remove(type,id){try{await api("DELETE",(type==="s"?"sessions/":"locations/")+id)}catch(e){alert("Delete failed ("+e.message+")")}}
+async function init(){
+  render();
+  try{S=await api("GET","data")}catch(e){$("#view").innerHTML='<div class="card">Could not load data from the server.</div>';return}
+  render();
+}
+function exportCsv(){
+  const q=v=>'"'+String(v??"").replace(/"/g,'""')+'"';
+  const rows=[["date","kind","location","stakes","game","buyin","reloads","cashout","profit","hours","start_time","end_time","notes"]];
+  sorted().forEach(s=>rows.push([s.date,s.kind||"cash",s.location,s.stakes,s.game,s.buyin,s.reloads||0,s.cashout,profit(s),s.hours||0,s.start_time,s.end_time,s.notes]));
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([rows.map(r=>r.map(q).join(",")).join("\n")],{type:"text/csv"}));
+  a.download="poker-sessions.csv";a.click();
+}
+
+
+/* ---------- import from Poker Analytics (.xml export) ---------- */
+let pending=null,kindF="all";
+const pad=n=>String(n).padStart(2,"0");
+const parseDT=t=>{const m=t.match(/(\d+)\/(\d+)\/(\d+) (\d+):(\d+):(\d+)/);return new Date(2000+ +m[3],m[1]-1,m[2],m[4],m[5],m[6])};
+const isoD=d=>d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate());
+const isoDT=d=>isoD(d)+"T"+pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds());
+const dt=t=>t?isoDT(parseDT(t)):"";
+const utcId=d=>Date.UTC(d.getFullYear(),d.getMonth(),d.getDate(),d.getHours(),d.getMinutes(),d.getSeconds());
+const topKey=o=>Object.entries(o||{}).sort((a,b)=>b[1]-a[1])[0]?.[0]??"";
+const tally=(o,a,b)=>{o[a]=o[a]||{};o[a][b]=(o[a][b]||0)+1};
+async function readImport(file){
+  const doc=new DOMParser().parseFromString(await file.text(),"application/xml");
+  if(doc.querySelector("parsererror")||!doc.querySelector("sessions"))return alert("That doesn't look like a Poker Analytics export.");
+  const sessions=[],fb={},sk={};
+  doc.querySelectorAll("sessions > cash, sessions > tournament").forEach(c=>{
+    const r=c.querySelector("result");if(!r)return;
+    const T=c.tagName==="tournament",b=[...r.querySelectorAll("buyin")],cc=[...r.querySelectorAll("chipcount")];
+    const st=parseDT(c.getAttribute("startdate")),ed=c.getAttribute("enddate")?parseDT(c.getAttribute("enddate")):null;
+    const total=+r.getAttribute("buyin")||0,f0=b.length?+b[0].getAttribute("amount"):total;
+    let h=ed?(ed-st)/36e5:0;if(h<0.05||h>16)h=0;
+    const loc=c.getAttribute("location")||"Unknown",bl=c.getAttribute("blinds")||"";
+    const ev=[...b.map(x=>["in",+x.getAttribute("amount"),dt(x.getAttribute("date"))]),...cc.map(x=>["stack",+x.getAttribute("value"),dt(x.getAttribute("date"))])];
+    sessions.push({id:utcId(st),kind:T?"tournament":"cash",location:loc,stakes:T?"":bl,date:isoD(st),start_time:isoDT(st),end_time:ed?isoDT(ed):"",
+      buyin:f0,reloads:total-f0,cashout:+r.getAttribute("chipcount")||0,hours:Math.round(h*100)/100,notes:c.getAttribute("comments")||"",
+      game:(c.getAttribute("variant")||"").split("|")[0],table_size:+c.getAttribute("tablesize")||0,limit_type:+c.getAttribute("limit")||0,
+      pause_seconds:+c.getAttribute("pauseDuration")||0,finish_pos:+r.getAttribute("finalpos")||0,players:+c.getAttribute("numberofplayers")||0,
+      format:T?(c.getAttribute("type")||""):"",events:JSON.stringify(ev)});
+    if(!T){tally(fb,loc,f0);tally(sk,loc,bl)}
+  });
+  const settings={},bk=doc.querySelector("bankrolls > bankroll");
+  if(bk&&bk.getAttribute("initial"))settings.start_bankroll=bk.getAttribute("initial");
+  const have=new Set(S.locs.map(l=>l.name)),locs=[...new Set(sessions.map(s=>s.location))].filter(n=>!have.has(n))
+    .map((n,i)=>({id:Date.now()+i,name:n,stakes:topKey(sk[n]),buyin:+topKey(fb[n])||0}));
+  const cash=sessions.filter(s=>s.kind==="cash"),tr=sessions.filter(s=>s.kind==="tournament");
+  const net=l=>l.reduce((a,s)=>a+profit(s),0),ds=sessions.map(s=>s.date).sort();
+  pending={sessions,locs,settings};
+  open(`<h2 style="margin:0">Import preview</h2><p><b>${cash.length}</b> cash sessions (<b class="${cls(net(cash))}">${money(net(cash))}</b>) and <b>${tr.length}</b> tournaments (<b class="${cls(net(tr))}">${money(net(tr))}</b>)<br>${ds[0]} to ${ds[ds.length-1]}<br>${settings.start_bankroll?"Starting bankroll: "+money(+settings.start_bankroll)+"<br>":""}${locs.length} new location${locs.length===1?"":"s"}: ${esc(locs.map(l=>l.name+" ("+(l.stakes||"?")+", "+money(l.buyin)+")").join(", "))||"none"}</p><p class="mu">Also saved: game type, start and end times, table size, pause time, tournament finish and field size, and mid-session stack updates. Importing again won't create duplicates. Hours come from start and end times; sessions over 16 hours get none.</p><button class="btn" id="doImport">Import</button> <button class="btn sec" id="cancel">Cancel</button>`);
+}
+async function runImport(){
+  const btn=$("#doImport");btn.disabled=true;btn.textContent="Importing…";
+  try{
+    for(let i=0;i<pending.sessions.length;i+=25)await api("POST","import",{locs:i?[]:pending.locs,settings:i?{}:pending.settings,sessions:pending.sessions.slice(i,i+25)});
+    S=await api("GET","data");pending=null;close();tab="stats";render();
+  }catch(e){btn.disabled=false;btn.textContent="Import";alert("Import failed ("+e.message+"). Safe to try again.")}
+}
+document.addEventListener("change",e=>{if(e.target.id==="imp"&&e.target.files[0])readImport(e.target.files[0])});
+const tagOf=s=>s.kind==="tournament"?" · Tournament":(s.game&&s.game!=="Hold'em"?" · "+esc(s.game):"");
+function bankCard(all){
+  const start=+(S.settings&&S.settings.start_bankroll)||0,net=all.reduce((a,s)=>a+profit(s),0);
+  const tabs=all.some(s=>s.kind==="tournament")?`<div style="display:flex;gap:6px;margin-top:10px">`+["all","cash","tournament"].map(k=>`<button class="btn ${kindF===k?"":"sec"}" data-kind="${k}" style="padding:6px 12px">${k[0].toUpperCase()+k.slice(1)}</button>`).join("")+`</div>`:"";
+  return `<div class="card"><div class="mu">Bankroll</div><div style="font-size:26px;font-weight:700">${money(start+net)}</div><div class="mu">Started at ${money(start)} · <a href="#" id="editStart" style="color:var(--ac)">edit</a></div>${tabs}</div>`;
+}
+
+/* ---------- views ---------- */
+function render(){
+  document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.t===tab));
+  $("#fab").style.display=tab==="locs"?"none":"block";
+  $("#view").innerHTML=tab==="sessions"?vSessions():tab==="stats"?vStats():vLocs();
+}
+function sorted(){return [...S.sessions].sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:a.id-b.id)}
+
+function vSessions(){
+  if(!S.sessions.length)return `<div class="card mu">No sessions yet. Add a location first (Locations tab), then tap + to log a session.</div>`;
+  return `<div class="card">`+[...sorted()].reverse().map(s=>{
+    const p=profit(s);
+    return `<div class="row" data-edit="${s.id}"><div><b>${esc(s.location)}</b> <small>${esc(s.stakes||"")}${tagOf(s)}</small><br><small>${fmtDate(s.date)} · in ${money(s.buyin+(s.reloads||0))}${s.hours?" · "+s.hours+"h":""}</small></div><b class="${cls(p)}">${money(p)}</b></div>`}).join("")+`</div>`;
+}
+
+function chart(list){
+  if(list.length<2)return `<div class="mu">Log at least two sessions to see the graph.</div>`;
+  let c=0;const pts=[{x:0,y:0}];list.forEach((s,i)=>{c+=profit(s);pts.push({x:i+1,y:c})});
+  const W=600,H=200,P=8,ys=pts.map(p=>p.y),mn=Math.min(...ys),mx=Math.max(...ys),r=(mx-mn)||1;
+  const X=x=>P+x/(pts.length-1)*(W-2*P),Y=y=>H-P-(y-mn)/r*(H-2*P);
+  const d=pts.map((p,i)=>(i?"L":"M")+X(p.x).toFixed(1)+","+Y(p.y).toFixed(1)).join(" ");
+  const zero=mn<=0&&mx>=0?`<line x1="0" x2="${W}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--ln)" stroke-dasharray="4 4"/>`:"";
+  return `<svg viewBox="0 0 ${W} ${H}">${zero}<path d="${d}" fill="none" stroke="var(--ac)" stroke-width="2.5" stroke-linejoin="round"/></svg><div class="mu" style="display:flex;justify-content:space-between"><span>Low ${money(mn)}</span><span>High ${money(mx)}</span></div>`;
+}
+
+function vStats(){
+  const all=sorted(),l=kindF==="all"?all:all.filter(x=>(x.kind||"cash")===kindF);if(!l.length)return bankCard(all)+`<div class="card mu">No sessions to show here yet.</div>`;
+  const ps=l.map(profit),tot=ps.reduce((a,b)=>a+b,0),wins=ps.filter(p=>p>0).length;
+  const hs=l.filter(s=>s.hours>0),hrs=hs.reduce((a,s)=>a+s.hours,0),hp=hs.reduce((a,s)=>a+profit(s),0);
+  const inv=l.reduce((a,s)=>a+s.buyin+(s.reloads||0),0);
+  const stat=(k,v,c)=>`<div class="stat"><small>${k}</small><b class="${c||""}">${v}</b></div>`;
+  const byLoc={};l.forEach(s=>{const o=byLoc[s.location]=byLoc[s.location]||{n:0,p:0,h:0,hp:0};o.n++;o.p+=profit(s);if(s.hours>0){o.h+=s.hours;o.hp+=profit(s)}});
+  const byMon={};l.forEach(s=>{const m=s.date.slice(0,7);byMon[m]=(byMon[m]||0)+profit(s)});
+  const mons=Object.keys(byMon).sort().slice(-12),mm=Math.max(...mons.map(m=>Math.abs(byMon[m])),1);
+  return bankCard(all)+`<div class="card"><div class="mu">Net result</div><div style="font-size:32px;font-weight:700" class="${cls(tot)}">${money(tot)}</div>${chart(l)}</div>
+  <div class="card grid">
+   ${stat("Sessions",l.length)}${stat("Win rate",Math.round(wins/l.length*100)+"% ("+wins+"–"+(l.length-wins)+")")}
+   ${stat("Avg / session",money(tot/l.length),cls(tot))}${stat("Hours logged",hrs?hrs.toFixed(1):"–")}
+   ${stat("Approx. $/hr",hrs?money(hp/hrs):"–",hrs?cls(hp):"")}${stat("ROI on money in",inv?(tot/inv*100).toFixed(1)+"%":"–",cls(tot))}
+   ${stat("Best session",money(Math.max(...ps)),"win")}${stat("Worst session",money(Math.min(...ps)),"loss")}
+   ${stat("Avg buy-in",money(inv/l.length))}${stat("Reload sessions",l.filter(s=>s.reloads>0).length+" of "+l.length)}
+  </div>
+  <div class="card"><b>By month</b><div style="margin-top:8px">${mons.map(m=>`<div style="display:flex;align-items:center;gap:8px;margin:5px 0;font-size:13px"><span style="width:62px" class="mu">${m}</span><div style="flex:1;display:flex"><div style="width:${Math.max(2,Math.abs(byMon[m])/mm*100)}%;height:14px;border-radius:4px;background:var(--${byMon[m]>=0?"win":"loss"})"></div></div><b class="${cls(byMon[m])}" style="width:70px;text-align:right">${money(byMon[m])}</b></div>`).join("")}</div></div>
+  <div class="card scroll"><b>By location</b><table><tr><th>Location</th><th>Sess.</th><th>Net</th><th>~$/hr</th></tr>${Object.entries(byLoc).sort((a,b)=>b[1].p-a[1].p).map(([k,o])=>`<tr><td>${esc(k)}</td><td>${o.n}</td><td class="${cls(o.p)}">${money(o.p)}</td><td>${o.h?money(o.hp/o.h):"–"}</td></tr>`).join("")}</table></div>
+  <div class="mu">$/hr only uses sessions where you entered hours, so treat it as a rough guide.</div>`;
+}
+
+function vLocs(){
+  return `<div class="card">${S.locs.length?S.locs.map(l=>`<div class="row" data-loc="${l.id}"><div><b>${esc(l.name)}</b><br><small>${esc(l.stakes||"")} · default buy-in ${money(l.buyin||0)}</small></div><span class="mu">Edit</span></div>`).join(""):`<div class="mu">No locations yet.</div>`}</div><button class="btn" id="addLoc">Add location</button> <button class="btn sec" id="csv">Export CSV</button> <button class="btn sec" id="impBtn">Import from Poker Analytics</button><input type="file" id="imp" accept=".xml,text/xml" hidden>`;
+}
+
+/* ---------- sheets ---------- */
+function open(html){$("#sheetBody").innerHTML=html;$("#sheet").classList.add("open")}
+function close(){$("#sheet").classList.remove("open")}
+
+function sessionForm(id){
+  if(!S.locs.length){open(`<h2>Add a location first</h2><p class="mu">Locations hold your stakes and default buy-in, so sessions fill in faster.</p><button class="btn" id="goLoc">Add location</button> <button class="btn sec" id="cancel">Close</button>`);return}
+  const s=S.sessions.find(x=>x.id==id)||{date:today(),location:S.locs[0].name,buyin:S.locs[0].buyin||"",reloads:"",cashout:"",hours:"",notes:""};
+  open(`<h2 style="margin:0">${id?"Edit":"New"} session</h2>
+  <label>Location</label><select id="f_loc">${S.locs.map(l=>`<option ${l.name===s.location?"selected":""}>${esc(l.name)}</option>`).join("")}</select>
+  <div class="two"><div><label>Date</label><input type="date" id="f_date" value="${s.date}"></div><div><label>Hours (optional)</label><input type="number" step="0.25" inputmode="decimal" id="f_h" value="${s.hours||""}"></div></div>
+  <div class="two"><div><label>Buy-in $</label><input type="number" inputmode="decimal" id="f_b" value="${s.buyin}"></div><div><label>Reloads / add-ons $</label><input type="number" inputmode="decimal" id="f_r" value="${s.reloads||""}" placeholder="0"></div></div>
+  <label>Cash-out $</label><input type="number" inputmode="decimal" id="f_c" value="${s.cashout}">
+  <label>Notes</label><textarea id="f_n" rows="2">${esc(s.notes)}</textarea>
+  <div id="f_p" style="margin:10px 0;font-weight:700"></div>
+  <button class="btn" id="saveS" data-id="${id||""}">Save</button> <button class="btn sec" id="cancel">Cancel</button> ${id?`<button class="btn del" id="delS" data-id="${id}">Delete</button>`:""}`);
+  const upd=()=>{const c=$("#f_c").value;if(c==="")return $("#f_p").textContent="";const p=+c-(+$("#f_b").value||0)-(+$("#f_r").value||0);$("#f_p").innerHTML=`Result: <span class="${cls(p)}">${money(p)}</span>`};
+  ["f_b","f_r","f_c"].forEach(i=>$("#"+i).oninput=upd);upd();
+  $("#f_loc").onchange=()=>{if(id)return;const l=S.locs.find(x=>x.name===$("#f_loc").value);if(l)$("#f_b").value=l.buyin||"";upd()};
+}
+
+function locForm(id){
+  const l=S.locs.find(x=>x.id==id)||{name:"",stakes:"",buyin:""};
+  open(`<h2 style="margin:0">${id?"Edit":"New"} location</h2>
+  <label>Name</label><input id="l_n" value="${esc(l.name)}" placeholder="e.g. Rivers Casino">
+  <div class="two"><div><label>Stakes</label><input id="l_s" value="${esc(l.stakes)}" placeholder="1/3"></div><div><label>Default buy-in $</label><input type="number" inputmode="decimal" id="l_b" value="${l.buyin}" placeholder="300"></div></div>
+  <p></p><button class="btn" id="saveL" data-id="${id||""}">Save</button> <button class="btn sec" id="cancel">Cancel</button> ${id?`<button class="btn del" id="delL" data-id="${id}">Delete</button>`:""}`);
+}
+
+/* ---------- events ---------- */
+document.addEventListener("click",async e=>{
+  const t=e.target,g=sel=>t.closest(sel);
+  if(g("nav button")){tab=g("nav button").dataset.t;return render()}
+  if(g("[data-kind]")){kindF=g("[data-kind]").dataset.kind;return render()}
+  if(t.id==="editStart"){e.preventDefault();const v=prompt("Starting bankroll ($)",(S.settings&&S.settings.start_bankroll)||"0");if(v!==null&&!isNaN(+v)){S.settings={...S.settings,start_bankroll:String(+v)};try{await api("PUT","settings",{key:"start_bankroll",value:String(+v)})}catch(x){alert("Save failed")}render()}return}
+  if(g("#fab"))return sessionForm();
+  if(g("[data-edit]"))return sessionForm(g("[data-edit]").dataset.edit);
+  if(g("[data-loc]"))return locForm(g("[data-loc]").dataset.loc);
+  if(g("#addLoc"))return locForm();
+  if(g("#csv"))return exportCsv();
+  if(g("#impBtn"))return $("#imp").click();
+  if(t.id==="doImport")return runImport();
+  if(g("#goLoc")){close();tab="locs";render();return locForm()}
+  if(g("#cancel")||t.id==="sheet")return close();
+  if(t.id==="saveS"){
+    const id=t.dataset.id?+t.dataset.id:Date.now(),loc=S.locs.find(l=>l.name===$("#f_loc").value);
+    if($("#f_c").value===""||$("#f_b").value==="")return alert("Enter a buy-in and cash-out.");
+    const item={id,location:loc.name,stakes:loc.stakes||"",date:$("#f_date").value||today(),buyin:+$("#f_b").value,reloads:+$("#f_r").value||0,cashout:+$("#f_c").value,hours:+$("#f_h").value||0,notes:$("#f_n").value};Object.assign(item,{...S.sessions.find(x=>x.id===id),...item});
+    const i=S.sessions.findIndex(x=>x.id===id);i>=0?S.sessions[i]=item:S.sessions.push(item);
+    await save("s",item);close();return render();
+  }
+  if(t.id==="delS"&&confirm("Delete this session?")){const id=+t.dataset.id;S.sessions=S.sessions.filter(x=>x.id!==id);await remove("s",id);close();return render()}
+  if(t.id==="saveL"){
+    const n=$("#l_n").value.trim();if(!n)return alert("Enter a name.");
+    const id=t.dataset.id?+t.dataset.id:Date.now(),item={id,name:n,stakes:$("#l_s").value.trim(),buyin:+$("#l_b").value||0};
+    const i=S.locs.findIndex(x=>x.id===id);i>=0?S.locs[i]=item:S.locs.push(item);
+    await save("l",item);close();return render();
+  }
+  if(t.id==="delL"&&confirm("Delete this location? Past sessions keep its name.")){const id=+t.dataset.id;S.locs=S.locs.filter(x=>x.id!==id);await remove("l",id);close();return render()}
+});
+init();
+</script>
+</body>
+</html>
